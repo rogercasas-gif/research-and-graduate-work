@@ -1,0 +1,764 @@
+---
+title: "hw1_Roger_Casas"
+author: "Roger Casas"
+date: "2026-10-07"
+output: html_document
+---
+
+# Seminar 1 Exercises: Roger Casas Riu
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+#Packages 
+
+library(glmnet)
+library(glue)
+library(ggplot2)
+library(caret)
+library(pROC)
+library(glmnet)
+library(dplyr)
+
+
+set.seed(1212)
+```
+
+## 8.2.2 Applied Exercise 1
+
+```{r, include = FALSE}
+
+spam <- read.table(file.path('C:/Users/Usuario/OneDrive/Documentos/BSE/Statistical Modelling and Inference/seminar1 (1)/seminar1/data/spam.data'), quote="\"", comment.char="")
+
+spam.names <- c(read.table("C:/Users/Usuario/OneDrive/Documentos/BSE/Statistical Modelling and Inference/seminar1 (1)/seminar1/data/spambase.names", sep = ":", skip = 33, nrows = 53, as.is = TRUE)[,1], "char_freq_#", read.table("C:/Users/Usuario/OneDrive/Documentos/BSE/Statistical Modelling and Inference/seminar1 (1)/seminar1/data/spambase.names", sep = ":", skip = 87, nrows = 3, as.is = TRUE)[, 1], "spam.01")
+names(spam) <- spam.names
+spam <- spam[sample(nrow(spam)),]
+
+
+
+
+```
+
+### Maximum Likelihood Estimator
+
+Fitting the model:
+
+```{r, warning=FALSE}
+fit.mle <- glm('spam.01 ~ .', data = spam, family = binomial(link = 'logit'))
+b.mle <- coef(fit.mle)
+summary.mle <- summary(fit.mle)
+```
+
+#### Which are the selected variables?
+
+- Obtaining a data frame with coefficients and p-values:
+
+```{r}
+b.mle <- data.frame(summary.mle$coefficients[,c(1,4)])
+head(b.mle, 10)
+
+```
+
+- Filtering for 5% significant coefficients
+
+```{r}
+significant.b.mle <- b.mle[(b.mle[,2] <= 0.05),]
+print(glue("Number of significant coefficients is {nrow(significant.b.mle)}"))
+head(significant.b.mle,3)
+#Names of the significant variables:
+rownames(significant.b.mle)
+```
+
+#### Predictive accuracy for the MLE
+
+- Generate a Q-(100-Q)% train-test split, for Q = 70 in this case:
+
+```{r}
+
+Q = 0.7
+partsel <- createDataPartition(spam$spam.01, p  = Q, list = FALSE)
+train <- spam[partsel,]
+test <- spam[-partsel,]
+```
+
+- Now fit the model within train data:
+
+```{r,warning=FALSE}
+
+fit.mle <- glm('spam.01~.', data = train, family = binomial(link ='logit')) 
+summary.mle <- summary(fit.mle)
+
+```
+
+- Obtain predicted probabilities and values:
+
+```{r}
+probs <- predict(fit.mle, newdata = test, type = 'response')
+preds <- ifelse(probs >= 0.5, 1, 0)
+actual <- test$spam.01
+```
+
+- Confusion matrix:
+
+```{r}
+confmatrix <- table(Actual = actual, Predicted = preds)
+dfconfmatrix <- as.data.frame(confmatrix)
+
+#Plot for the confusion matrix
+
+confusionplot <- 
+      ggplot(dfconfmatrix, aes(x = Predicted, y = Actual, fill = Freq)) +
+           geom_tile(color = "white") +
+           geom_text(aes(label = Freq), size = 6) +
+          scale_fill_gradient(low = "white", high = "darkred") +
+          labs(
+                 title = "Ouf-Of-Sample Confusion Matrix",
+                 x = "Predicted class",
+                 y = "Actual class",
+                fill = "Count"
+            ) + 
+          coord_equal() +
+          theme_minimal()
+  
+  
+print(confusionplot)
+  
+```
+
+- Out-Of-Sample ROC Curve:
+
+```{r}
+
+roctest <- cbind(test, probs)
+roc.mle <- roc(data = roctest, predictor = 'probs', response = 'spam.01' )
+
+
+
+roc_df <- as.data.frame(coords(roc.mle, x = "all", ret = c("specificity", "sensitivity")))
+  
+roc_df$false_positive_rate <- 1 - roc_df$specificity
+auc_value <- as.numeric(auc(roc.mle))
+  
+rocgg <- ggplot(roc_df, aes(x = false_positive_rate, y = sensitivity)) +
+      geom_abline(
+        slope = 1, intercept = 0,
+        linetype = "dashed", color = "grey60"
+      ) +
+      geom_path(color = "darkred", linewidth = 1.2) +
+      coord_equal(xlim = c(0, 1), ylim = c(0, 1), expand = FALSE) +
+      scale_x_continuous(breaks = seq(0, 1, by = 0.2)) +
+      scale_y_continuous(breaks = seq(0, 1, by = 0.2)) +
+      labs(
+        title = "ROC Curve",
+        subtitle = sprintf("AUC = %.3f", auc_value),
+        x = "False positive rate (1 − specificity)",
+        y = "True positive rate (sensitivity)"
+      ) +
+      theme_minimal(base_size = 13) +
+      theme(
+        panel.grid.minor = element_blank(),
+        plot.title = element_text(face = "bold")
+      )
+
+print(rocgg)
+
+```
+
+- Store Specificity, Sensitivity, AUC, Accuracy, Brier Score (binary MSPE), and Log-Loss:
+
+```{r}
+
+#Notation
+TN <- confmatrix[1,1]
+FN <- confmatrix[2,1]
+FP <- confmatrix[1,2]
+TP <- confmatrix[2,2]
+
+#Calculations
+Spec <- TN/(TN+FP)
+Sens <- TP/(TP+FN)
+AUC <- as.numeric(roc.mle$auc)  
+Accuracy <- (TP+TN)/(TN+FP+TP+FN)
+Brier <- mean((test$spam.01-probs)^2)
+
+y <- as.numeric(test$spam.01)
+eps <- 1e-15
+probs_safe <- pmin(pmax(probs, eps), 1 - eps)
+Logloss <- -mean(
+  y * log(probs_safe) + (1 - y) * log(1 - probs_safe)
+)
+
+
+#Constructing the data frame
+performance <- c(Spec,Sens,Accuracy, AUC ,Brier, Logloss ) |> as.data.frame( ,row.names = c('Specificity', 'Sensitivity', 'Accuracy', 'ROC AUC' , 'Brier', 'Log-loss'))
+colnames(performance) <- c('OOS Value')                                                      
+#Ggplot
+  
+metrics <- data.frame(
+    Metric = rownames(performance),
+    OOS_Value = performance[,1])
+  
+metricsgg <- ggplot(metrics,aes(x = Metric,y = OOS_Value,fill = Metric)
+  ) +
+    geom_col(width = 0.7, show.legend = FALSE) +
+    geom_text(aes(label = sprintf("%.3f", OOS_Value)),hjust = -0.15,size = 4) +
+    coord_flip() +
+    scale_y_continuous(
+      limits = c(0,1.1),
+      breaks = seq(0, 1, by = 0.2)
+    ) +
+    labs(
+      title = "Out-of-sample performance",
+      x = NULL,
+      y = "Metric value"
+    ) +
+    theme_minimal(base_size = 13)
+
+print(metricsgg)
+
+#Recover number of non-zero coefficients (either significant or not) and append it to performance data.frame: 
+
+Mle.Nvariables <- as.integer(sum((fit.mle$coefficients != 0)))
+performance <- t(performance) |> as.data.frame()
+rownames(performance) <- c("OOS Value")
+colnames(performance) <- c('Specificity', 'Sensitivity', 'Accuracy', 'ROC AUC' , 'Brier', 'Log-loss')
+performance["N-Variables"] <- as.integer(Mle.Nvariables)
+performance
+
+```
+
+- Make the performance evaluation a callable function for next sections
+
+```{r}
+
+performance_eval <- function(preds, probs, actual = test$spam.01){
+confmatrix <- table(Actual = actual, Predicted = preds)
+dfconfmatrix <- as.data.frame(confmatrix)
+#Plot for the confusion matrix:
+confusionplot <- 
+      ggplot(dfconfmatrix, aes(x = Predicted, y = Actual, fill = Freq)) +
+           geom_tile(color = "white") +
+           geom_text(aes(label = Freq), size = 6) +
+          scale_fill_gradient(low = "white", high = "darkred") +
+          labs(
+                 title = "Ouf-Of-Sample Confusion Matrix",
+                 x = "Predicted class",
+                 y = "Actual class",
+                fill = "Count"
+            ) + 
+          coord_equal() +
+          theme_minimal()
+print(confusionplot)
+#Out-Of-Sample ROC Curve:
+roctest <- cbind(test, probs)
+rocobject <- roc(data = roctest, predictor = 'probs', response = 'spam.01' )
+roc_df <- as.data.frame(coords(rocobject, x = "all", ret = c("specificity", "sensitivity")))
+roc_df$false_positive_rate <- 1 - roc_df$specificity
+auc_value <- as.numeric(auc(rocobject))
+rocgg <- ggplot(roc_df, aes(x = false_positive_rate, y = sensitivity)) +
+      geom_abline(
+        slope = 1, intercept = 0,
+        linetype = "dashed", color = "grey60"
+      ) +
+      geom_path(color = "darkred", linewidth = 1.2) +
+      coord_equal(xlim = c(0, 1), ylim = c(0, 1), expand = FALSE) +
+      scale_x_continuous(breaks = seq(0, 1, by = 0.2)) +
+      scale_y_continuous(breaks = seq(0, 1, by = 0.2)) +
+      labs(
+        title = "ROC Curve",
+        subtitle = sprintf("AUC = %.3f", auc_value),
+        x = "False positive rate (1 − specificity)",
+        y = "True positive rate (sensitivity)"
+      ) +
+      theme_minimal(base_size = 13) +
+      theme(
+        panel.grid.minor = element_blank(),
+        plot.title = element_text(face = "bold")
+      )
+
+print(rocgg)
+# Store Specificity, Sensitivity, AUC, Accuracy, Brier Score (binary MSPE), and Log-Loss:
+#Notation
+TN <- confmatrix[1,1]
+FN <- confmatrix[2,1]
+FP <- confmatrix[1,2]
+TP <- confmatrix[2,2]
+#Calculations
+Spec <- TN/(TN+FP)
+Sens <- TP/(TP+FN)
+AUC <- as.numeric(rocobject$auc)  
+Accuracy <- (TP+TN)/(TN+FP+TP+FN)
+Brier <- mean((test$spam.01-probs)^2)
+y <- as.numeric(test$spam.01)
+eps <- 1e-15
+probs_safe <- pmin(pmax(probs, eps), 1 - eps)
+Logloss <- -mean(
+  y * log(probs_safe) + (1 - y) * log(1 - probs_safe)
+)
+
+#Constructing the data frame
+performance <- c(Spec,Sens,Accuracy, AUC ,Brier, Logloss ) |> as.data.frame( ,row.names = c('Specificity', 'Sensitivity', 'Accuracy', 'ROC AUC' , 'Brier', 'Log-loss'))
+colnames(performance) <- c('OOS Value')                                                      
+#Ggplot
+metrics <- data.frame(
+    Metric = rownames(performance),
+    OOS_Value = performance[,1])
+  
+metricsgg <- ggplot(metrics,aes(x = Metric,y = OOS_Value,fill = Metric)
+  ) +
+    geom_col(width = 0.7, show.legend = FALSE) +
+    geom_text(aes(label = sprintf("%.3f", OOS_Value)),hjust = -0.15,size = 4) +
+    coord_flip() +
+    scale_y_continuous(
+      limits = c(0,1.1),
+      breaks = seq(0, 1, by = 0.2)
+    ) +
+    labs(
+      title = "Out-of-sample performance",
+      x = NULL,
+      y = "Metric value"
+    ) +
+    theme_minimal(base_size = 13)
+print(metricsgg)
+return(performance)    
+}
+```
+
+### Cross - Validated LASSO
+
+#### Which are the selected variables?
+
+- Fitting the model:
+
+```{r}
+
+designmat <- as.matrix(spam[,-ncol(spam)])
+cvlasso.fit <- cv.glmnet(x = designmat, y = spam$spam.01, nfolds = 10,family = 'binomial')
+
+```
+
+- Selected variables:
+
+```{r}
+# Coefficients at the lambda with minimum cross-validation error
+coef_mat <- as.matrix(coef(cvlasso.fit, s = "lambda.min"))
+
+# Exclude the intercept when identifying selected predictors
+is_predictor <- rownames(coef_mat) != "(Intercept)"
+selected <- is_predictor & coef_mat[, 1] != 0
+
+cvlasso.nonzero <- data.frame(
+  Variable = rownames(coef_mat)[selected],
+  Coefficient = coef_mat[selected, 1],
+  row.names = NULL
+)
+
+cvlasso.zero <- data.frame(
+  Variable = rownames(coef_mat)[is_predictor & !selected],
+  Coefficient = coef_mat[is_predictor & !selected, 1],
+  row.names = NULL
+)
+
+print(glue("Number of selected predictors: {nrow(cvlasso.nonzero)}"))
+
+cvLasso.Nvariables <- nrow(cvlasso.nonzero)
+head(cvlasso.nonzero,5)
+
+```
+
+#### Predictive accuracy
+
+- Fit Lasso for Train Data
+
+```{r}
+traindesign <- designmat[partsel,]
+testdesign <- designmat[-partsel,]
+cvlasso.fit <- cv.glmnet(x = traindesign, y = train$spam.01, nfolds = 10,family = 'binomial')
+
+```
+
+- Obtain "preds" "probs" and "actual"
+
+```{r}
+
+probabilities <- predict(cvlasso.fit, newx = testdesign, s = 'lambda.min', type = 'response')[,1]  
+predictions <- ifelse(probabilities >= 0.5, 1, 0)
+actual <- test$spam.01 #Redundant actually 
+
+
+
+```
+
+- Call the previous function (see the MLE section) to obtain Out-Of-Sample Performance Metrics:
+
+```{r}
+cvlasso.performance <- performance_eval(preds =predictions, probs = probabilities)
+
+```
+
+- Append the number of surviving covariates to the performance data.frame for later comparison
+
+
+```{r}
+
+cvlasso.performance <- t(cvlasso.performance) |> as.data.frame()
+rownames(cvlasso.performance) <- c("OOS Value")
+colnames(cvlasso.performance) <- c('Specificity', 'Sensitivity', 'Accuracy', 'ROC AUC' , 'Brier', 'Log-loss')
+cvlasso.performance["N-Variables"] <- as.integer(cvLasso.Nvariables)
+cvlasso.performance
+
+
+
+```
+
+### BIC - LASSO
+
+#### Which are the selected variables?
+
+- Set modify the routines function for logistic regression: 
+
+```{r}
+lasso_bic_binomial <- function(y, x, x_test = testdesign) {
+  fit <- glmnet(x = x, y = y, family = "binomial", alpha = 1)
+
+  # Use training data to select lambda by BIC
+  eta_train <- predict(fit, newx = x, s = fit$lambda, type = "link")
+  probs_train <- pmin(pmax(plogis(eta_train), 1e-15), 1 - 1e-15)
+  loglik <- colSums(y * log(probs_train) + (1 - y) * log(1 - probs_train))
+
+  n <- length(y)
+  n_selected <- colSums(as.matrix(fit$beta) != 0)
+  df <- n_selected + 1
+  bic <- -2 * loglik + log(n) * df
+
+  best <- which.min(bic)
+  lambda_opt <- fit$lambda[best]
+
+  coef <- as.matrix(coef(fit, s = lambda_opt))[, 1]
+  names(coef)[names(coef) == "(Intercept)"] <- "Intercept"
+
+  ypred_logodds <- as.numeric(
+    predict(fit, newx = x_test, s = lambda_opt, type = "link")
+  )
+  ypred <- plogis(ypred_logodds)
+
+  output <- list(
+    coef = coef,
+    ypred = ypred,
+    ypred_logodds = ypred_logodds,
+    lambda.opt = lambda_opt,
+    lambda = data.frame(
+      lambda = fit$lambda,
+      bic = bic,
+      nvars = n_selected),
+    fit = fit
+  )
+  return(output)
+}
+
+```
+
+
+
+- Fitting the model:
+
+```{r}
+biclasso.fit <- lasso_bic_binomial(x = designmat, y = spam$spam.01)
+
+```
+
+- Selected variables:
+
+```{r}
+# Coefficients at the lambda with minimum cross-validation error
+biclasso.coefs <- biclasso.fit$coef |> as.data.frame() 
+
+biclasso.nonzero <- filter(biclasso.coefs, (biclasso.fit$coef !=0) & (rownames(biclasso.coefs) != "Intercept"))
+colnames(biclasso.nonzero) <- 'Estimate'
+
+biclasso.Nvariables <- nrow(biclasso.nonzero)
+
+print(glue("Number of selected predictors:{nrow(biclasso.nonzero)}"))
+biclasso.nonzero
+
+```
+
+#### Predictive accuracy
+
+- Fit BIC - Lasso for Train Data and predict for Test Data (the function returns predicted OOS output automatically):
+
+```{r}
+biclasso.fit <- lasso_bic_binomial(x = traindesign, y = train$spam.01, x_test = testdesign)
+
+```
+
+- Obtain "preds" "probs" and "actual":
+
+```{r}
+
+probabilities <- biclasso.fit$ypred 
+predictions <- ifelse(probabilities >= 0.5, 1, 0)
+actual <- test$spam.01 #Redundant actually 
+
+
+
+```
+
+- Call the previous function to obtain Out-Of-Sample Performance Metrics:
+
+```{r}
+biclasso.performance <- performance_eval(preds =predictions, probs = probabilities)
+
+```
+
+- Append the number of surviving covariates to the performance data.frame for later comparison:
+
+
+```{r}
+biclasso.performance <- t(biclasso.performance) |> as.data.frame()
+rownames(biclasso.performance) <- c("OOS Value")
+colnames(biclasso.performance) <- c('Specificity', 'Sensitivity', 'Accuracy', 'ROC AUC' , 'Brier', 'Log-loss')
+biclasso.performance["N-Variables"] <- as.integer(biclasso.Nvariables)
+biclasso.performance
+```
+
+### Final comparison and answer. Which model to select? 
+
+```{r}
+
+finalperformance <- performance |> rbind(cvlasso.performance[1,], biclasso.performance[1,])
+finalperformance$Type <- c('MLE', 'CV - LASSO', 'BIC - LASSO') 
+rownames(finalperformance) <- c('OOS - MLE','OOS - CVLASSO', 'OOS - BICLASSO')  
+finalperformance
+```
+
+- A concluding plot: 
+
+```{r}
+metric_cols <- names(finalperformance)[1:6]
+n_models <- nrow(finalperformance)
+
+plot_data <- data.frame(
+  Metric = rep(metric_cols, each = n_models),
+  Value = as.numeric(as.matrix(finalperformance[, metric_cols])),
+  Model = rep(rownames(finalperformance), times = length(metric_cols)),
+  Type = rep(finalperformance$Type, times = length(metric_cols)),
+  N_Variables = rep(finalperformance$`N-Variables`, times = length(metric_cols))
+)
+
+plot_data$Legend <- paste0(
+  plot_data$Type, " (", plot_data$N_Variables, ")"
+)
+
+metric_plots <- lapply(metric_cols, function(metric_name) {
+  metric_data <- plot_data[plot_data$Metric == metric_name, ]
+  upper_limit <- max(metric_data$Value, na.rm = TRUE) * 1.2
+
+  legend_names <- unique(plot_data$Legend)
+  model_colors <- c("steelblue", "goldenrod1", "darkred")
+  names(model_colors) <- legend_names
+
+  ggplot(metric_data, aes(x = Model, y = Value, fill = Legend)) +
+    geom_col(width = 0.65) +
+    geom_text(
+      aes(label = sprintf("%.3f", Value)),
+      vjust = -0.35,
+      size = 4
+    ) +
+    scale_fill_manual(values = model_colors) +
+    scale_y_continuous(
+      limits = c(0, upper_limit),
+      expand = expansion(mult = c(0, 0.03))
+    ) +
+    labs(
+      title = paste("Out-of-sample", metric_name),
+      x = NULL,
+      y = metric_name,
+      fill = NULL
+    ) +
+    theme_minimal(base_size = 13) +
+    theme(
+      legend.position = "bottom",
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      panel.grid.major.x = element_blank(),
+      plot.title = element_text(face = "bold")
+    )
+})
+
+names(metric_plots) <- metric_cols
+
+for (p in metric_plots) {
+  print(p)
+}
+
+```
+
+
+## Answer: 
+
+Overall, computed differences in model performance seem nearly negligible. However, if substantial concretion is expected, the BIC approach appears to be the most sensible election when considering all Out-Of-Sample metrics as a whole. For weighted measures like the Log-Loss, however, the Cross-Validated Lasso also arises as a suitable candidate.
+
+It is worth emphasizing, in this sense, that the Specificity-Sensitivity trade-off proposed by the BIC algorithm is more suitable considering the theoretical context of the case. As the BIC reports higher Specificity, it reduces the probability of Type I error occurring (i.e. of non-spam emails incorrectly being labeled as spam). The consequences of a non-spam email being discarded are worse in terms of the user's utility than those of a Type II setting (a spam email appearing in the main inbox). Therefore, Specificity deserves special consideration regarding the final decision for a research paper.
+
+Inference-wise, moreover, model-selection consistency is to be taken into account as a positive trait of the BIC as well. It also entails a non-negligibly more parsimonious equation than the MLE (54 vs 58 variables), while difference with respect to the Cross-Validated Lasso is omittable. When computing confidence intervals and significance tests, however, the MLE estimator behaves much better.
+
+Ultimately, for the aforementioned reasons, the BIC appears to offer an optimal trade-off between all the dimensions analyzed, especially for predictive purposes. Running time for the different algorithms may also help one decide between the three methodologies when dealing with a larger amount of rows (observations) or columns (variables) of the problem's design matrix.
+
+
+
+
+## 8.2.2 Applied Exercise 2
+
+### 8.2.3.1 Data and Context:
+
+```{r}
+data(epil, package = "MASS")
+
+# Keep only one row per subject (period 1) to avoid repeated measures
+df <- epil %>%
+  dplyr::filter(period == 1) %>%
+  dplyr::select(y, base)
+
+dim(df)
+```
+
+
+### 8.2.3.2 Train/Test Split and Models
+
+
+
+####Question A. Report the average test NLL for: - (i) [intercept-only = 33.28513], - (ii) one-covariate (base) [= 33.28513.]
+
+- Which model is better?
+
+Your answer: The model including base performs better.  
+
+
+
+```{r}
+set.seed(42)
+
+poisson_nll_vec <- function(y, mu) {
+  # vectorized Poisson negative log-likelihood
+  # uses lgamma(y+1) for log(y!)
+  mu - y * log(mu) + lgamma(y + 1)
+}
+
+one_split_eval <- function(df, test_frac = 0.1) {
+  n <- nrow(df)
+  test_idx <- sample.int(n, size = ceiling(test_frac * n))
+  test <- df[test_idx, , drop = FALSE]
+  train <- df[-test_idx, , drop = FALSE]
+
+  ###########################
+  # COMPLETE THE CODE BELOW #
+  ###########################
+  
+  # Fit models on train
+  m0 <-  glm(y~1, family = poisson(), data = train)         # intercept-only
+  m1 <- glm(y~base, family = poisson(), data = train)      # with covariate
+
+  # Predict means on test
+  mu0_test <- predict(m0, newdata = test, type = 'response')         # intercept-only test set prediction
+  mu1_test <- predict(m1, newdata = test, type = 'response')        # with covariate test set prediction
+
+  # Compute mean test NLL
+  nll0 <- mean(poisson_nll_vec(y = test$y, mu = mu0_test))              # intercept-only
+  nll1 <- mean(poisson_nll_vec(y = test$y, mu = mu1_test))             # with covariate
+
+  list(nll0 = nll0, nll1 = nll1, n_test = nrow(test))
+}
+
+res1 <- one_split_eval(df, test_frac = 0.1)
+res1
+```
+
+###8.2.3.3 Estimating the Expected Out-of-Sample Log-Likelihood Loss
+
+
+####Question B. Based on the repeated splits: What is the estimated expected average test NLL for each model? Provide the estimate and a standard error.
+
+-Your answer:
+
+```{r}
+R <- 1000
+out <- replicate(R, {
+  tmp <- one_split_eval(df, test_frac = 0.1)
+  c(nll0 = tmp$nll0, nll1 = tmp$nll1)
+})
+
+out <- t(out) %>% as.data.frame()
+colnames(out) <- c("nll0", "nll1")
+
+
+#We use the sample average and standard deviations as sensible estimators for the true expectation and standard error resquested: 
+
+m0_nll_avg <- mean(out$nll0) 
+m0_nll_sd <- sd(out$nll0)/sqrt(R)
+
+m1_nll_avg <- mean(out$nll1) 
+m1_nll_sd <- sd(out$nll1)/sqrt(R) 
+
+
+
+# Provide an estimate and a standard error for the expected average NLL for each model
+
+print(glue("m0 average : {m0_nll_avg} 
+            m0 standard error: {m0_nll_sd} 
+            m1 average: {m1_nll_avg} 
+            m1 standard error:  {m1_nll_sd}"
+))
+
+```
+####8.2.3.3.1 Visualizing the Distribution of Test NLLs Across Splits
+ 
+```{r} 
+out_long <- out %>%
+  tidyr::pivot_longer(cols = everything(),
+                      names_to = "model",
+                      values_to = "test_nll")
+
+ggplot(out_long, aes(x = test_nll, fill = model)) +
+  geom_density(alpha = 0.4) +
+  labs(title = "Distribution of Test NLL Across 1.000 Random Train/Test Splits",
+       x = "Average Test Negative Log-Likelihood",
+       y = "Density")
+
+```
+
+###8.2.3.4 Cross-Validation Check (k-fold)
+
+Question C. Do the CV results agree with the repeated-split results?
+
+-Your answer: Yes, the the model including base reports a much better performance. 
+
+```{r}
+
+kfold_cv <- function(df, k = 10) {
+  n <- nrow(df)
+  fold_id <- sample(rep(1:k, length.out = n))
+  res <- lapply(1:k, function(kid) {
+    test <- df[fold_id == kid, , drop = FALSE]
+    train <- df[fold_id != kid, , drop = FALSE]
+
+    m0 <- glm(y ~ 1, data = train, family = poisson())
+    m1 <- glm(y ~ base, data = train, family = poisson())
+
+    mu0_test <- predict(m0, newdata = test, type = "response")
+    mu1_test <- predict(m1, newdata = test, type = "response")
+
+    c(
+      nll0 = mean(poisson_nll_vec(test$y, mu0_test)),
+      nll1 = mean(poisson_nll_vec(test$y, mu1_test))
+    )
+  })
+
+  mat <- do.call(rbind, res)
+  colMeans(mat)
+}
+
+set.seed(42)
+cv_res <- kfold_cv(df, k = 10)
+cv_res
+```
